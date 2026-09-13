@@ -43,6 +43,8 @@ module async_fifo_tb;
   always #(wr_half) wr_clk = ~wr_clk;
   always #(rd_half) rd_clk = ~rd_clk;
 
+  localparam real BASE_HALF = 5.0;   // wr_half held here for the ratio sweep
+
   // ---------------------------------------------------------------- scoreboard
   logic [7:0] model_q [$];
   int errors      = 0;
@@ -116,6 +118,33 @@ module async_fifo_tb;
     @(negedge rd_clk) rd_en <= 1'b0;
   endtask
 
+  // one clock-ratio data point: reconfigure wr_half/rd_half, run concurrent
+  // random read/write traffic, drain, and check the golden model emptied out
+  task automatic test_ratio(input real wr_h, input real rd_h, input string label);
+    int cycles;
+    int w0, r0;
+    begin
+      wr_half = wr_h;
+      rd_half = rd_h;
+      do_reset();
+      w0 = writes_done;
+      r0 = reads_done;
+      cycles = 250;
+      fork
+        drive_writes(cycles, 60);
+        drive_reads (cycles, 60);
+      join
+      drive_reads(cycles, 100);
+      repeat (10) @(posedge rd_clk);
+      if (model_q.size() != 0)
+        flag($sformatf("[%s] %0d entries left unread (wr_period=%0.2fns rd_period=%0.2fns)",
+                        label, model_q.size(), 2.0*wr_half, 2.0*rd_half));
+      else
+        $display("  [%s] ok   wr_period=%6.2fns rd_period=%6.2fns  writes=%0d reads=%0d",
+                  label, 2.0*wr_half, 2.0*rd_half, writes_done-w0, reads_done-r0);
+    end
+  endtask
+
   // ---------------------------------------------------------------- tests
   initial begin
     $dumpfile("async_fifo_tb.vcd");
@@ -167,19 +196,17 @@ module async_fifo_tb;
     if (model_q.size() != 0)
       flag($sformatf("Test 3: %0d entries left unread", model_q.size()));
 
-    // -------- Test 4: swap clock rates (read faster than write)
-    $display("[Test 4] read clock faster than write clock");
-    wr_half = 8.0;   // 16 ns
-    rd_half = 3.0;   //  6 ns
-    do_reset();
-    fork
-      drive_writes(300, 60);
-      drive_reads (800, 70);
-    join
-    drive_reads(400, 100);
-    repeat (10) @(posedge rd_clk);
-    if (model_q.size() != 0)
-      flag($sformatf("Test 4: %0d entries left unread", model_q.size()));
+    // -------- Test 4: rd_clk:wr_clk period-ratio sweep, 1:5 .. 5:1
+    $display("[Test 4] read:write clock-period ratio sweep (1:5 .. 5:1)");
+    test_ratio(BASE_HALF, BASE_HALF/5.0, "rd:wr = 1:5");
+    test_ratio(BASE_HALF, BASE_HALF/4.0, "rd:wr = 1:4");
+    test_ratio(BASE_HALF, BASE_HALF/3.0, "rd:wr = 1:3");
+    test_ratio(BASE_HALF, BASE_HALF/2.0, "rd:wr = 1:2");
+    test_ratio(BASE_HALF, BASE_HALF,     "rd:wr = 1:1");
+    test_ratio(BASE_HALF, BASE_HALF*2.0, "rd:wr = 2:1");
+    test_ratio(BASE_HALF, BASE_HALF*3.0, "rd:wr = 3:1");
+    test_ratio(BASE_HALF, BASE_HALF*4.0, "rd:wr = 4:1");
+    test_ratio(BASE_HALF, BASE_HALF*5.0, "rd:wr = 5:1");
 
     // ---------------------------------------------------------------- summary
     $display("--------------------------------------------------");
@@ -193,7 +220,7 @@ module async_fifo_tb;
 
   // global watchdog
   initial begin
-    #500000;
+    #2_000_000;
     $display("*** ERROR: watchdog timeout");
     $finish;
   end
